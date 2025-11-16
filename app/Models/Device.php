@@ -9,8 +9,6 @@ class Device extends Model
 {
     use HasFactory, HasUid;
 
-    public $timestamps = false;
-
      /**
      * The attributes that are mass assignable.
      *
@@ -18,6 +16,7 @@ class Device extends Model
      */
     protected $fillable = [
         'uuid',
+        'sync',
     ];
 
     protected static function boot()

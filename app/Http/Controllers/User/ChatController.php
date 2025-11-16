@@ -324,7 +324,6 @@ class ChatController extends Controller
         $data["device_name"] = $device->name;
         $data["phone"] = $device->phone;
         $data["sync"] = $device->sync;
-        $data["sync"] = $device->sync;
         $data["status"] = $device->status;
 
         // If synchronization is in progress (status=1, sync=0), return 202
