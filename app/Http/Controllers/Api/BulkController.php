@@ -1102,9 +1102,9 @@ class BulkController extends Controller
                 'trace' => $e->getTraceAsString()
             ]);
             throw $e;
+        } finally {
+            $device->update(['sync' => 1]);
         }
-
-        $device->update(['sync' => 1]);
 
         return response()->json([
             'success' => true,
