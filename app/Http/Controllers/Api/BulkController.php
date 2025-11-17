@@ -408,7 +408,11 @@ class BulkController extends Controller
                     $contact->device_lid = $device->id . '_' . $lid;
                 }
 
-                $contact->save();
+                try {
+                    $contact->save();
+                } catch (\Exception $e) {
+                    // Ignore duplicate errors, just use existing contact data
+                }
                 $is_exist = $contact;
             } else {
                 // Create new contact
