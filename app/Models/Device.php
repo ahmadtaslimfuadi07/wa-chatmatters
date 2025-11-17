@@ -17,6 +17,7 @@ class Device extends Model
     protected $fillable = [
         'uuid',
         'sync',
+        'sync_progress',
     ];
 
     protected static function boot()

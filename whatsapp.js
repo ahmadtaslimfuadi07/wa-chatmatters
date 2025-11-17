@@ -120,14 +120,15 @@ const createSession = async (sessionId, isLegacy = false, res = null) => {
                         try {
                             const historySyncNotification = getHistoryMsg(msg.message)
                             const res = await downloadAndProcessHistorySyncNotification(historySyncNotification, {})
-                            const { chats, contacts, messages, syncType } = res
-                            const { success, totalMessages } = await sendBatchWebhook(
+                            const { chats, contacts, messages, syncType, progress } = res
+                            const { success, totalMessages } = await sendBatchWebhook({
                                 sessionId,
                                 chats,
                                 contacts,
                                 messages,
-                                syncType
-                            )
+                                syncType,
+                                progress,
+                            })
                             console.log(
                                 `History sync ${sessionId}: ${totalMessages} msgs - status: ${
                                     success ? 'success' : 'failed'
@@ -259,7 +260,7 @@ const sentWebHook = (sessionId, webhookData, fromMe, msg) => {
     } catch {}
 }
 
-const sendBatchWebhook = async (sessionId, chats, contacts, messages, syncType) => {
+const sendBatchWebhook = async ({ sessionId, chats, contacts, messages, syncType, progress }) => {
     const webhookUrl = process.env.APP_URL + '/api/batch-webhook/' + sessionId
 
     let success = false
@@ -270,6 +271,7 @@ const sendBatchWebhook = async (sessionId, chats, contacts, messages, syncType) 
             contacts,
             messages,
             syncType,
+            progress,
         })
 
         if (response.status >= 200 && response.status < 300) {

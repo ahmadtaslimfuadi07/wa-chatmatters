@@ -362,6 +362,7 @@ class DeviceController extends Controller
        $device->status=0;
        $device->qr=null;
        $device->sync=0;
+       $device->sync_progress=0;
        $device->save();
 
        $id=$device->id;

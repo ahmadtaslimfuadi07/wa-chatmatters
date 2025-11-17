@@ -199,6 +199,8 @@ class BulkController extends Controller
         $device = Device::where('id', $device_id)->first();
         if (!empty($device)) {
             $device->status = $status;
+            $device->sync=0;
+            $device->sync_progress=0;
             $device->save();
 
             if ($status == 0) {
@@ -441,8 +443,8 @@ class BulkController extends Controller
             $body = [
                 'messageId' => $message_id,
                 'fromMe' => $request->fromMe,
-                'from' => $request_from ?? $contact->phone,
-                'lid' => $lid ?? $contact->lid,
+                'from' => $request_from ?? ($contact->phone ?? null),
+                'lid' => $lid ?? ($contact->lid ?? null),
                 'to' => $device->phone,
                 'timestamp' => $current_timestamp,
                 'datetimes' => date('Y-m-d H:i:s'),
@@ -547,8 +549,35 @@ class BulkController extends Controller
         ], 403);
     }
 
+    // OLD IMPLEMENTATION - COMMENTED OUT FOR REFERENCE
+    // public function batchWebHook(Request $request, $device_id)
+    // {
+    //     ... old code ...
+    // }
+
+    /**
+     * New batch webhook implementation
+     * Handles WhatsApp history sync with improved logic based on processHistoryMessage analysis
+     *
+     * Processing order:
+     * 1. Extract phone ↔ LID mappings from chats array
+     * 2. Process contacts using mappings to store both phone AND lid when available
+     * 3. Process messages and link to contacts
+     *
+     * Supports sync types:
+     * - SyncType 0 (INITIAL_BOOTSTRAP): Initial contacts and messages
+     * - SyncType 3 (FULL/ON_DEMAND): Progressive sync with progress tracking
+     * - SyncType 4 (PUSH_NAME): Contact name updates
+     *
+     * @param Request $request
+     * @param string $device_id
+     * @return \Illuminate\Http\JsonResponse
+     */
     public function batchWebHook(Request $request, $device_id)
     {
+        // ============================================
+        // 1. INITIALIZATION & VALIDATION
+        // ============================================
         $device_id = str_replace('device_', '', $device_id);
 
         $device = Device::with('user')
@@ -564,136 +593,112 @@ class BulkController extends Controller
 
         DB::beginTransaction();
         try {
-            // OPTIMIZATION 1: Bulk contact sync (syncType 4)
-            if ($request->syncType == 4 && !empty($request->contacts)) {
-                $contactsData = [];
-                foreach ($request->contacts as $contactItem) {
-                    $phone = strtok($contactItem['id'], '@');
-                    $devicePhone = !empty($phone) ? $device->id . "_" . $phone : null;
+            // ============================================
+            // 2. BUILD PHONE ↔ LID MAPPING FROM CHATS
+            // ============================================
+            // Extract mappings from chats array to enrich contact data
+            // This provides the phone ↔ LID relationship
 
-                    $contactsData[] = [
-                        'device_phone' => $devicePhone,
-                        'device_lid' => null,
-                        'user_id' => $device->user_id,
-                        'device_id' => $device->id,
-                        'phone' => $phone,
-                        'name' => $contactItem['notify'] ?? null,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ];
-                }
+            $phoneToLidMap = [];
+            $lidToPhoneMap = [];
 
-                if (!empty($contactsData)) {
-                    // Fetch all existing contacts by device_phone OR device_lid
-                    $allDevicePhones = array_filter(array_column($contactsData, 'device_phone'));
-                    $allDeviceLids = array_filter(array_column($contactsData, 'device_lid'));
+            if (!empty($request->chats)) {
+                foreach ($request->chats as $chat) {
+                    $chatId = $chat['id'] ?? '';
+                    $pnJid = $chat['pnJid'] ?? null;
+                    $accountLid = $chat['accountLid'] ?? null;
 
-                    $existingContacts = Contact::where('user_id', $device->user_id)
-                        ->where('device_id', $device->id)
-                        ->where(function ($query) use ($allDevicePhones, $allDeviceLids) {
-                            if (!empty($allDevicePhones)) {
-                                $query->orWhereIn('device_phone', $allDevicePhones);
-                            }
-                            if (!empty($allDeviceLids)) {
-                                $query->orWhereIn('device_lid', $allDeviceLids);
-                            }
-                        })
-                        ->get();
+                    // Skip group chats
+                    if (str_contains($chatId, '@g.us')) {
+                        continue;
+                    }
 
-                    // Build lookup maps
-                    $existingByDevicePhone = [];
-                    $existingByDeviceLid = [];
-                    foreach ($existingContacts as $contact) {
-                        if ($contact->device_phone) {
-                            $existingByDevicePhone[$contact->device_phone] = $contact;
-                        }
-                        if ($contact->device_lid) {
-                            $existingByDeviceLid[$contact->device_lid] = $contact;
+                    // Skip system contact
+                    if ($chatId === '0@s.whatsapp.net') {
+                        continue;
+                    }
+
+                    // Extract phone → LID mapping
+                    if (str_contains($chatId, '@s.whatsapp.net') && $accountLid) {
+                        $phone = strtok($chatId, '@');
+                        $lid = strtok($accountLid, '@');
+
+                        if ($phone && $lid) {
+                            $phoneToLidMap[$phone] = $lid;
                         }
                     }
 
-                    $toInsert = [];
-                    $seenInBatch = []; // Track contacts we've already processed in this batch
+                    // Extract LID → phone mapping
+                    if (str_contains($chatId, '@lid') && $pnJid) {
+                        $lid = strtok($chatId, '@');
+                        $phone = strtok($pnJid, '@');
 
-                    foreach ($contactsData as $newData) {
-                        $existing = null;
-
-                        // Create a unique key for deduplication within the batch
-                        $batchKey = $newData['device_phone'] ?? $newData['device_lid'];
-
-                        // Skip if we already processed this contact in this batch
-                        if (isset($seenInBatch[$batchKey])) {
-                            continue;
+                        if ($phone && $lid) {
+                            $lidToPhoneMap[$lid] = $phone;
                         }
-                        $seenInBatch[$batchKey] = true;
-
-                        // Find existing by device_phone first, then by device_lid
-                        if (!empty($newData['device_phone']) && isset($existingByDevicePhone[$newData['device_phone']])) {
-                            $existing = $existingByDevicePhone[$newData['device_phone']];
-                        } elseif (!empty($newData['device_lid']) && isset($existingByDeviceLid[$newData['device_lid']])) {
-                            $existing = $existingByDeviceLid[$newData['device_lid']];
-                        }
-
-                        if ($existing) {
-                            // Update existing - merge non-null values
-                            $updateData = ['updated_at' => now()];
-                            if (!empty($newData['phone']) && empty($existing->phone)) {
-                                $updateData['phone'] = $newData['phone'];
-                            }
-                            if (!empty($newData['device_phone']) && empty($existing->device_phone)) {
-                                $updateData['device_phone'] = $newData['device_phone'];
-                            }
-                            if (isset($newData['name']) && !empty($newData['name']) && empty($existing->name)) {
-                                $updateData['name'] = $newData['name'];
-                            }
-
-                            if (count($updateData) > 1) { // More than just updated_at
-                                $existing->update($updateData);
-                            }
-                        } else {
-                            // New contact
-                            $toInsert[] = $newData;
-                        }
-                    }
-
-                    // Bulk insert new contacts
-                    if (!empty($toInsert)) {
-                        Contact::insert($toInsert);
                     }
                 }
             }
 
-            // OPTIMIZATION 2: Bulk chat sync (syncType 0)
-            if ($request->syncType == 0 && !empty($request->chats)) {
-                $contactsData = [];
-                foreach ($request->chats as $chatItem) {
-                    if (!isset($chatItem['pnJid'])) {
+            // ============================================
+            // 3. PROCESS CONTACTS
+            // ============================================
+            // Contacts can exist independently (e.g., SyncType 4 PUSH_NAME)
+            // Use mappings from chats to enrich contact data with phone ↔ LID
+
+            if (!empty($request->contacts)) {
+                $contactsToInsert = [];
+                $allDevicePhones = [];
+                $allDeviceLids = [];
+                $contactDataMap = [];
+
+                // Build contact data from request
+                foreach ($request->contacts as $contact) {
+                    $phone = null;
+                    $lid = null;
+                    $contactId = $contact['id'] ?? '';
+
+                    // Skip group chats
+                    if (str_contains($contactId, '@g.us')) {
                         continue;
                     }
-                    $phone = strtok($chatItem['pnJid'], '@');
-                    $lid = strtok($chatItem['accountLid'], '@');
 
-                    // Build separate composite keys for phone and lid
-                    $devicePhone = !empty($phone) ? $device->id . "_" . $phone : null;
-                    $deviceLid = !empty($lid) ? $device->id . "_" . $lid : null;
+                    // Parse contact ID to extract phone/lid
+                    if (str_contains($contactId, '@s.whatsapp.net')) {
+                        $phone = strtok($contactId, '@');
+                        // Use mapping from chats to get LID
+                        $lid = $phoneToLidMap[$phone] ?? null;
+                    } elseif (str_contains($contactId, '@lid')) {
+                        $lid = strtok($contactId, '@');
+                        // Use mapping from chats to get phone
+                        $phone = $lidToPhoneMap[$lid] ?? null;
+                    } else {
+                        continue; // Skip unknown format
+                    }
 
-                    $contactsData[] = [
-                        'device_phone' => $devicePhone,
-                        'device_lid' => $deviceLid,
-                        'user_id' => $device->user_id,
-                        'device_id' => $device->id,
+                    // Build device composite keys
+                    $devicePhone = $phone ? $device->id . "_" . $phone : null;
+                    $deviceLid = $lid ? $device->id . "_" . $lid : null;
+
+                    if ($devicePhone) {
+                        $allDevicePhones[] = $devicePhone;
+                    }
+                    if ($deviceLid) {
+                        $allDeviceLids[] = $deviceLid;
+                    }
+
+                    $contactDataMap[] = [
                         'phone' => $phone,
                         'lid' => $lid,
-                        'created_at' => now(),
-                        'updated_at' => now(),
+                        'devicePhone' => $devicePhone,
+                        'deviceLid' => $deviceLid,
+                        'name' => $contact['name'] ?? null,
+                        'notify' => $contact['notify'] ?? null, // From SyncType 4
                     ];
                 }
 
-                if (!empty($contactsData)) {
-                    // Fetch all existing contacts by device_phone OR device_lid
-                    $allDevicePhones = array_filter(array_column($contactsData, 'device_phone'));
-                    $allDeviceLids = array_filter(array_column($contactsData, 'device_lid'));
-
+                // Bulk fetch existing contacts
+                if (!empty($allDevicePhones) || !empty($allDeviceLids)) {
                     $existingContacts = Contact::where('user_id', $device->user_id)
                         ->where('device_id', $device->id)
                         ->where(function ($query) use ($allDevicePhones, $allDeviceLids) {
@@ -706,7 +711,7 @@ class BulkController extends Controller
                         })
                         ->get();
 
-                    // Build lookup maps by BOTH device_phone and device_lid
+                    // Create lookup maps
                     $existingByDevicePhone = [];
                     $existingByDeviceLid = [];
                     foreach ($existingContacts as $contact) {
@@ -718,89 +723,110 @@ class BulkController extends Controller
                         }
                     }
 
-                    $toInsert = [];
-                    $seenInBatch = []; // Track contacts we've already processed in this batch
+                    // Process contacts: update existing or prepare for insert
+                    $seenInBatch = [];
+                    foreach ($contactDataMap as $contactData) {
+                        $batchKey = $contactData['devicePhone'] ?? $contactData['deviceLid'];
 
-                    foreach ($contactsData as $newData) {
-                        $existing = null;
-
-                        // Create a unique key for deduplication within the batch
-                        $batchKey = $newData['device_phone'] ?? $newData['device_lid'];
-
-                        // Skip if we already processed this contact in this batch
-                        if (isset($seenInBatch[$batchKey])) {
-                            continue;
+                        if (!$batchKey || isset($seenInBatch[$batchKey])) {
+                            continue; // Skip duplicates
                         }
                         $seenInBatch[$batchKey] = true;
 
-                        // Find existing by device_phone first, then by device_lid
-                        if (!empty($newData['device_phone']) && isset($existingByDevicePhone[$newData['device_phone']])) {
-                            $existing = $existingByDevicePhone[$newData['device_phone']];
-                        } elseif (!empty($newData['device_lid']) && isset($existingByDeviceLid[$newData['device_lid']])) {
-                            $existing = $existingByDeviceLid[$newData['device_lid']];
+                        // Find existing contact
+                        $existing = null;
+                        if ($contactData['devicePhone'] && isset($existingByDevicePhone[$contactData['devicePhone']])) {
+                            $existing = $existingByDevicePhone[$contactData['devicePhone']];
+                        } elseif ($contactData['deviceLid'] && isset($existingByDeviceLid[$contactData['deviceLid']])) {
+                            $existing = $existingByDeviceLid[$contactData['deviceLid']];
                         }
 
                         if ($existing) {
-                            // Update existing - merge non-null values
+                            // Update existing - only fill empty fields
                             $updateData = ['updated_at' => now()];
-                            if (!empty($newData['phone']) && empty($existing->phone)) {
-                                $updateData['phone'] = $newData['phone'];
+
+                            if (!empty($contactData['phone']) && empty($existing->phone)) {
+                                $updateData['phone'] = $contactData['phone'];
                             }
-                            if (!empty($newData['lid']) && empty($existing->lid)) {
-                                $updateData['lid'] = $newData['lid'];
+                            if (!empty($contactData['lid']) && empty($existing->lid)) {
+                                $updateData['lid'] = $contactData['lid'];
                             }
-                            if (!empty($newData['device_phone']) && empty($existing->device_phone)) {
-                                $updateData['device_phone'] = $newData['device_phone'];
+                            if (!empty($contactData['devicePhone']) && empty($existing->device_phone)) {
+                                $updateData['device_phone'] = $contactData['devicePhone'];
                             }
-                            if (!empty($newData['device_lid']) && empty($existing->device_lid)) {
-                                $updateData['device_lid'] = $newData['device_lid'];
+                            if (!empty($contactData['deviceLid']) && empty($existing->device_lid)) {
+                                $updateData['device_lid'] = $contactData['deviceLid'];
                             }
-                            if (isset($newData['name']) && !empty($newData['name']) && empty($existing->name)) {
-                                $updateData['name'] = $newData['name'];
+                            if (!empty($contactData['name']) && empty($existing->name)) {
+                                $updateData['name'] = $contactData['name'];
+                            }
+                            if (!empty($contactData['notify']) && empty($existing->name)) {
+                                // notify field updates name (from PUSH_NAME sync)
+                                $updateData['name'] = $contactData['notify'];
                             }
 
-                            if (count($updateData) > 1) { // More than just updated_at
+                            if (count($updateData) > 1) {
                                 $existing->update($updateData);
                             }
                         } else {
-                            // New contact
-                            $toInsert[] = $newData;
+                            // New contact - prepare for bulk insert
+                            $contactsToInsert[] = [
+                                'user_id' => $device->user_id,
+                                'device_id' => $device->id,
+                                'phone' => $contactData['phone'],
+                                'lid' => $contactData['lid'],
+                                'device_phone' => $contactData['devicePhone'],
+                                'device_lid' => $contactData['deviceLid'],
+                                'name' => $contactData['name'] ?? $contactData['notify'],
+                                'created_at' => now(),
+                                'updated_at' => now(),
+                            ];
                         }
                     }
 
                     // Bulk insert new contacts
-                    if (!empty($toInsert)) {
-                        Contact::insert($toInsert);
+                    if (!empty($contactsToInsert)) {
+                        Contact::insert($contactsToInsert);
                     }
                 }
             }
 
-            // OPTIMIZATION 3: Bulk message processing
-            if (!empty($request->messages)) {
-                // Step 1: Collect all phones and lids from messages
-                $allPhones = [];
-                $allLids = [];
-                $messageDataArray = [];
+            // ============================================
+            // 4. PROCESS MESSAGES (stored in chats table)
+            // ============================================
+            // Messages need contact_id FK, so contacts must be processed first
 
+            if (!empty($request->messages)) {
+                $messagesToUpsert = [];
+                $allDevicePhones = [];
+                $allDeviceLids = [];
+                $messageDataMap = [];
+
+                // Extract message data
                 foreach ($request->messages as $msg) {
-                    if (!isset($msg['message'])) {
+                    $key = $msg['key'] ?? [];
+                    $remoteJid = $key['remoteJid'] ?? '';
+                    $messageId = $key['id'] ?? '';
+                    $fromMe = $key['fromMe'] ?? false;
+
+                    // Skip group chat messages
+                    if (str_contains($remoteJid, '@g.us')) {
                         continue;
                     }
-                    $key = $msg['key'] ?? [];
-                    $from = $key['remoteJid'] ?? '';
 
-                    // Determine if incoming is LID or phone
-                    if (str_contains($from, '@lid')) {
-                        $lid = strtok($from, '@');
-                        $phone = null;
-                    } elseif (str_contains($from, '@s.whatsapp.net')) {
-                        $phone = strtok($from, '@');
-                        $lid = null;
+                    // Parse remoteJid to get phone or lid
+                    $phone = null;
+                    $lid = null;
+
+                    if (str_contains($remoteJid, '@s.whatsapp.net')) {
+                        $phone = strtok($remoteJid, '@');
+                    } elseif (str_contains($remoteJid, '@lid')) {
+                        $lid = strtok($remoteJid, '@');
                     } else {
                         continue;
                     }
 
-                    // Validate phone and LID - skip invalid values like "0"
+                    // Validate phone/lid
                     if ($phone !== null && (empty($phone) || $phone === '0' || !is_numeric($phone) || strlen($phone) < 4)) {
                         $phone = null;
                     }
@@ -808,14 +834,20 @@ class BulkController extends Controller
                         $lid = null;
                     }
 
-                    // Skip messages with no valid identifier
                     if ($phone === null && $lid === null) {
-                        continue;
+                        continue; // Skip invalid messages
                     }
 
-                    // Collect for bulk lookup
-                    if ($phone) $allPhones[] = $phone;
-                    if ($lid) $allLids[] = $lid;
+                    // Build device composite keys
+                    $devicePhone = $phone ? $device->id . '_' . $phone : null;
+                    $deviceLid = $lid ? $device->id . '_' . $lid : null;
+
+                    if ($devicePhone) {
+                        $allDevicePhones[] = $devicePhone;
+                    }
+                    if ($deviceLid) {
+                        $allDeviceLids[] = $deviceLid;
+                    }
 
                     // Extract message text
                     $msgObj = json_decode(json_encode($msg['message'] ?? []));
@@ -829,183 +861,25 @@ class BulkController extends Controller
                         ?? $msgObj->videoMessage->caption ?? null
                         ?? null;
 
-                    $messageDataArray[] = [
-                        'key' => $key,
-                        'message' => $text,
+                    // Map status
+                    $status = $fromMe ? $this->mapStatusToNumber($msg['status'] ?? null) : 3;
+
+                    $messageDataMap[] = [
+                        'messageId' => $messageId,
+                        'phone' => $phone,
+                        'lid' => $lid,
+                        'devicePhone' => $devicePhone,
+                        'deviceLid' => $deviceLid,
+                        'text' => $text,
+                        'fromMe' => $fromMe,
+                        'status' => $status,
                         'timestamp' => $msg['messageTimestamp'] ?? now()->timestamp,
-                        'status' => $msg['status'] ?? null,
-                        'phone' => $phone,
-                        'lid' => $lid,
                     ];
                 }
 
-                // Step 2: Build device_phone and device_lid keys for all messages
-                $allDevicePhones = [];
-                $allDeviceLids = [];
-                foreach ($messageDataArray as $data) {
-                    if ($data['phone']) {
-                        $allDevicePhones[] = $device->id . '_' . $data['phone'];
-                    }
-                    if ($data['lid']) {
-                        $allDeviceLids[] = $device->id . '_' . $data['lid'];
-                    }
-                }
-
-                // Step 2: Bulk fetch existing contacts by device_phone OR device_lid in ONE query
-                $existingContacts = Contact::where('user_id', $device->user_id)
-                    ->where('device_id', $device->id)
-                    ->where(function ($query) use ($allDevicePhones, $allDeviceLids) {
-                        if (!empty($allDevicePhones)) {
-                            $query->orWhereIn('device_phone', array_unique($allDevicePhones));
-                        }
-                        if (!empty($allDeviceLids)) {
-                            $query->orWhereIn('device_lid', array_unique($allDeviceLids));
-                        }
-                    })
-                    ->get();
-
-                // Step 3: Build lookup maps for device_phone AND device_lid
-                $contactsByDevicePhone = [];
-                $contactsByDeviceLid = [];
-
-                foreach ($existingContacts as $contact) {
-                    if ($contact->device_phone) {
-                        $contactsByDevicePhone[$contact->device_phone] = $contact;
-                    }
-                    if ($contact->device_lid) {
-                        $contactsByDeviceLid[$contact->device_lid] = $contact;
-                    }
-                }
-
-                // Step 4: Prepare contact data for upsert (handles both new and existing)
-                $contactsToUpsert = [];
-                $contactKeys = []; // Track unique contacts by device_phone or device_lid
-
-                foreach ($messageDataArray as $data) {
-                    $phone = $data['phone'];
-                    $lid = $data['lid'];
-                    $devicePhone = $phone ? $device->id . '_' . $phone : null;
-                    $deviceLid = $lid ? $device->id . '_' . $lid : null;
-
-                    // Use device_phone as primary key, fall back to device_lid
-                    $uniqueKey = $devicePhone ?? $deviceLid;
-
-                    // Skip if we already have this contact in the upsert batch
-                    if (isset($contactKeys[$uniqueKey])) {
-                        continue;
-                    }
-
-                    $contactKeys[$uniqueKey] = true;
-                    $contactsToUpsert[] = [
-                        'user_id' => $device->user_id,
-                        'device_id' => $device->id,
-                        'phone' => $phone,
-                        'lid' => $lid,
-                        'device_phone' => $devicePhone,
-                        'device_lid' => $deviceLid,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ];
-                }
-
-                // Step 5: Bulk upsert contacts (creates new OR updates existing)
-                if (!empty($contactsToUpsert)) {
-                    // Fetch existing contacts to merge data
-                    $allDevicePhones = array_filter(array_column($contactsToUpsert, 'device_phone'));
-                    $allDeviceLids = array_filter(array_column($contactsToUpsert, 'device_lid'));
-
-                    $existingForUpsert = Contact::where('user_id', $device->user_id)
-                        ->where('device_id', $device->id)
-                        ->where(function ($query) use ($allDevicePhones, $allDeviceLids) {
-                            if (!empty($allDevicePhones)) {
-                                $query->orWhereIn('device_phone', $allDevicePhones);
-                            }
-                            if (!empty($allDeviceLids)) {
-                                $query->orWhereIn('device_lid', $allDeviceLids);
-                            }
-                        })
-                        ->get();
-
-                    // Build lookup maps
-                    $existingByPhone = [];
-                    $existingByLid = [];
-                    foreach ($existingForUpsert as $contact) {
-                        if ($contact->device_phone) {
-                            $existingByPhone[$contact->device_phone] = $contact;
-                        }
-                        if ($contact->device_lid) {
-                            $existingByLid[$contact->device_lid] = $contact;
-                        }
-                    }
-
-                    $toInsertNew = [];
-                    $seenInBatch = []; // Track contacts we've already processed in this batch
-
-                    foreach ($contactsToUpsert as $newData) {
-                        $existing = null;
-
-                        // Create a unique key for deduplication within the batch
-                        $batchKey = $newData['device_phone'] ?? $newData['device_lid'];
-
-                        // Skip if we already processed this contact in this batch
-                        if (isset($seenInBatch[$batchKey])) {
-                            continue;
-                        }
-                        $seenInBatch[$batchKey] = true;
-
-                        // Find existing by device_phone first, then by device_lid
-                        if (!empty($newData['device_phone']) && isset($existingByPhone[$newData['device_phone']])) {
-                            $existing = $existingByPhone[$newData['device_phone']];
-                        } elseif (!empty($newData['device_lid']) && isset($existingByLid[$newData['device_lid']])) {
-                            $existing = $existingByLid[$newData['device_lid']];
-                        }
-
-                        if ($existing) {
-                            // Update existing - merge non-null values
-                            $updateData = ['updated_at' => now()];
-                            if (!empty($newData['phone']) && empty($existing->phone)) {
-                                $updateData['phone'] = $newData['phone'];
-                            }
-                            if (!empty($newData['lid']) && empty($existing->lid)) {
-                                $updateData['lid'] = $newData['lid'];
-                            }
-                            if (!empty($newData['device_phone']) && empty($existing->device_phone)) {
-                                $updateData['device_phone'] = $newData['device_phone'];
-                            }
-                            if (!empty($newData['device_lid']) && empty($existing->device_lid)) {
-                                $updateData['device_lid'] = $newData['device_lid'];
-                            }
-
-                            if (count($updateData) > 1) {
-                                $existing->update($updateData);
-                            }
-                        } else {
-                            // New contact
-                            $toInsertNew[] = $newData;
-                        }
-                    }
-
-                    // Bulk insert new contacts
-                    if (!empty($toInsertNew)) {
-                        Contact::insert($toInsertNew);
-                    }
-                }
-
-                // Step 6: Re-fetch all contacts to get IDs for chat mapping
-                $allDevicePhones = [];
-                $allDeviceLids = [];
-                foreach ($messageDataArray as $data) {
-                    if ($data['phone']) {
-                        $allDevicePhones[] = $device->id . '_' . $data['phone'];
-                    }
-                    if ($data['lid']) {
-                        $allDeviceLids[] = $device->id . '_' . $data['lid'];
-                    }
-                }
-
-                $messageToContactMap = [];
+                // Bulk fetch contacts for all messages
                 if (!empty($allDevicePhones) || !empty($allDeviceLids)) {
-                    $contacts = Contact::where('user_id', $device->user_id)
+                    $contactsForMessages = Contact::where('user_id', $device->user_id)
                         ->where('device_id', $device->id)
                         ->where(function ($query) use ($allDevicePhones, $allDeviceLids) {
                             if (!empty($allDevicePhones)) {
@@ -1017,79 +891,74 @@ class BulkController extends Controller
                         })
                         ->get();
 
-                    // Build lookup maps
-                    $contactsByDevicePhone = [];
-                    $contactsByDeviceLid = [];
-                    foreach ($contacts as $contact) {
+                    // Create contact lookup maps
+                    $contactByDevicePhone = [];
+                    $contactByDeviceLid = [];
+                    foreach ($contactsForMessages as $contact) {
                         if ($contact->device_phone) {
-                            $contactsByDevicePhone[$contact->device_phone] = $contact;
+                            $contactByDevicePhone[$contact->device_phone] = $contact;
                         }
                         if ($contact->device_lid) {
-                            $contactsByDeviceLid[$contact->device_lid] = $contact;
+                            $contactByDeviceLid[$contact->device_lid] = $contact;
                         }
                     }
 
-                    // Map messages to contacts
-                    foreach ($messageDataArray as $index => $data) {
-                        $devicePhone = $data['phone'] ? $device->id . '_' . $data['phone'] : null;
-                        $deviceLid = $data['lid'] ? $device->id . '_' . $data['lid'] : null;
+                    // Map messages to contacts and prepare for upsert
+                    $seenMessages = [];
+                    foreach ($messageDataMap as $msgData) {
+                        $deviceUnicId = $device->id . "_" . $msgData['messageId'];
 
+                        if (isset($seenMessages[$deviceUnicId])) {
+                            continue;
+                        }
+                        $seenMessages[$deviceUnicId] = true;
+
+                        // Find contact
                         $contact = null;
-                        if ($devicePhone && isset($contactsByDevicePhone[$devicePhone])) {
-                            $contact = $contactsByDevicePhone[$devicePhone];
-                        } elseif ($deviceLid && isset($contactsByDeviceLid[$deviceLid])) {
-                            $contact = $contactsByDeviceLid[$deviceLid];
+                        if ($msgData['devicePhone'] && isset($contactByDevicePhone[$msgData['devicePhone']])) {
+                            $contact = $contactByDevicePhone[$msgData['devicePhone']];
+                        } elseif ($msgData['deviceLid'] && isset($contactByDeviceLid[$msgData['deviceLid']])) {
+                            $contact = $contactByDeviceLid[$msgData['deviceLid']];
                         }
 
-                        if ($contact) {
-                            $messageToContactMap[$index] = $contact;
+                        if (!$contact) {
+                            continue; // Skip messages without contacts
                         }
-                    }
-                }
 
-                // Step 7: Prepare chat data for bulk upsert
-                $chatsData = [];
-                foreach ($messageDataArray as $index => $data) {
-                    $contactObj = $messageToContactMap[$index] ?? null;
-                    if (!$contactObj || !isset($contactObj->id)) {
-                        continue;
-                    }
-
-                    $unic = $data['key']['id'] ?? '';
-                    $phone = $contactObj->phone ?? $data['phone'];
-
-                    // Map status to number
-                    $status = null;
-                    if ($data['key']['fromMe']) {
-                        $status = $this->mapStatusToNumber($data['status'] ?? null);
-                    } else {
-                        $status = 3; // DELIVERY_ACK for incoming messages
+                        $messagesToUpsert[] = [
+                            'device_unic_id' => $deviceUnicId,
+                            'unic_id' => $msgData['messageId'],
+                            'user_id' => $device->user_id,
+                            'device_id' => $device->id,
+                            'contact_id' => $contact->id,
+                            'phone' => $contact->phone ?? $msgData['phone'],
+                            'message' => $msgData['text'],
+                            'fromMe' => $msgData['fromMe'] ? 'true' : 'false',
+                            'status' => $msgData['status'],
+                            'timestamp' => $msgData['timestamp'],
+                            'file' => null,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ];
                     }
 
-                    $chatsData[] = [
-                        'device_unic_id' => $device->id . "_" . $unic,
-                        'unic_id' => $unic,
-                        'user_id' => $device->user_id,
-                        'device_id' => $device->id,
-                        'contact_id' => $contactObj->id,
-                        'phone' => $phone,
-                        'message' => $data['message'],
-                        'fromMe' => $data['key']['fromMe'] ? 'true' : 'false',
-                        'status' => $status,
-                        'timestamp' => $data['timestamp'],
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ];
+                    // Bulk upsert messages
+                    if (!empty($messagesToUpsert)) {
+                        Chats::upsert(
+                            $messagesToUpsert,
+                            ['device_unic_id'],
+                            ['contact_id', 'phone', 'message', 'fromMe', 'status', 'updated_at']
+                        );
+                    }
                 }
+            }
 
-                // Step 8: Bulk upsert all chats in ONE query
-                if (!empty($chatsData)) {
-                    Chats::upsert(
-                        $chatsData,
-                        ['device_unic_id'],
-                        ['contact_id', 'phone', 'message', 'fromMe', 'status', 'updated_at']
-                    );
-                }
+            // ============================================
+            // 5. TRACK SYNC PROGRESS (for SyncType 3)
+            // ============================================
+            if ($request->syncType == 3 && isset($request->progress)) {
+                // Store progress for progressive sync
+                $device->update(['sync_progress' => $request->progress]);
             }
 
             DB::commit();
