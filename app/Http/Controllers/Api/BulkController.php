@@ -397,8 +397,18 @@ class BulkController extends Controller
             }
 
             if ($contact) {
-                // Update existing contact (only fields that are not null)
-                $contact->update($data);
+                // Update existing contact - only fill empty fields to avoid constraint violations
+                if (!empty($request_from) && empty($contact->phone)) {
+                    $contact->phone = $request_from;
+                    $contact->device_phone = $device->id . '_' . $request_from;
+                }
+
+                if (!empty($lid) && empty($contact->lid)) {
+                    $contact->lid = $lid;
+                    $contact->device_lid = $device->id . '_' . $lid;
+                }
+
+                $contact->save();
                 $is_exist = $contact;
             } else {
                 // Create new contact
