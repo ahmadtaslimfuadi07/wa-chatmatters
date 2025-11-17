@@ -291,6 +291,7 @@ class BulkController extends Controller
         }
 
         $message_id = $request->messageId ?? '';
+        $message_timestamp = $request->other['messageTimestamp'] ?? $current_timestamp;
         $message = json_encode($request->message ?? '');
         $message = json_decode($message);
 
@@ -419,7 +420,7 @@ class BulkController extends Controller
                     'device_unic_id' => $device->id . "_" . $request->messageId,
                     'message' => $message,
                     'fromMe' => ($request->fromMe == 1) ? $request->fromMe : 'false',
-                    'timestamp' => $current_timestamp,
+                    'timestamp' => $message_timestamp,
                     'created_at' => date('Y-m-d H:i:s'),
                     'updated_at' => date('Y-m-d H:i:s'),
                 ]
@@ -446,7 +447,7 @@ class BulkController extends Controller
                 'from' => $request_from ?? ($contact->phone ?? null),
                 'lid' => $lid ?? ($contact->lid ?? null),
                 'to' => $device->phone,
-                'timestamp' => $current_timestamp,
+                'timestamp' => $message_timestamp,
                 'datetimes' => date('Y-m-d H:i:s'),
             ];
             if ($message != null) {
