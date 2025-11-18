@@ -243,7 +243,8 @@ const setDeviceStatus = (sessionId, status) => {
 }
 
 const sentWebHook = (sessionId, webhookData, fromMe, msg) => {
-    const webhookUrl = process.env.APP_URL + '/api/send-webhook/' + sessionId
+    const deviceId = sessionId.replace('device_', '')
+    const webhookUrl = process.env.BE_WHATSAPP + '/api/contacts/batch-webhook/' + deviceId
 
     try {
         axios
