@@ -495,6 +495,7 @@ class BulkController extends Controller
                 $webhooklogs = new Webhookslogs;
                 $webhooklogs->webhooks_id = $webhook[$i]->id;
                 $webhooklogs->request = json_encode($body, true);
+                $webhooklogs->original_request = json_encode($request->all(), true);
                 $webhooklogs->response = json_encode(json_decode($content));
                 $webhooklogs->response_code = $statusCode;
                 $webhooklogs->endpoint = $webhook[$i]->url;
