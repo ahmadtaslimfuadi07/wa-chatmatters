@@ -418,6 +418,7 @@ class BulkController extends Controller
                         'phone' => $request_from ?? null,
                         'lid' => $lid ?? null,
                         'device_id' => $device->id ?? null,
+                        'request' => $request->all(),
                         'exception' => $e
                     ]);
                 }
@@ -463,6 +464,7 @@ class BulkController extends Controller
                 'message_id' => $request->messageId ?? null,
                 'from' => $request_from ?? null,
                 'contact_id' => $contact_id ?? null,
+                'request' => $request->all(),
                 'exception' => $e
             ]);
         }
