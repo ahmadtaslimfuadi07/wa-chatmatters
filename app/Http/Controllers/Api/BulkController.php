@@ -412,6 +412,14 @@ class BulkController extends Controller
                     $contact->save();
                 } catch (\Exception $e) {
                     // Ignore duplicate errors, just use existing contact data
+                    info('Contact save failed', [
+                        'error' => $e->getMessage(),
+                        'contact_id' => $contact->id ?? null,
+                        'phone' => $request_from ?? null,
+                        'lid' => $lid ?? null,
+                        'device_id' => $device->id ?? null,
+                        'exception' => $e
+                    ]);
                 }
                 $is_exist = $contact;
             } else {
@@ -449,7 +457,14 @@ class BulkController extends Controller
                 $is_exist->update(['name' => $request->other['pushName'] ?? NULL]);
             }
         } catch (Exception $e) {
-            info($e);
+            info('Contact/Chat insert failed', [
+                'error' => $e->getMessage(),
+                'device_id' => $device->id ?? null,
+                'message_id' => $request->messageId ?? null,
+                'from' => $request_from ?? null,
+                'contact_id' => $contact_id ?? null,
+                'exception' => $e
+            ]);
         }
 
         //START WEBHOOK SEND
