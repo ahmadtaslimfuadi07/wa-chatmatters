@@ -397,32 +397,121 @@ class BulkController extends Controller
             }
 
             if ($contact) {
-                // Update existing contact - only fill empty fields to avoid constraint violations
+                // Check if we need to merge with another contact due to unique constraints
+                $needsMerge = false;
+                $otherContact = null;
+
+                // If trying to add phone, check if another contact already has this phone
                 if (!empty($request_from) && empty($contact->phone)) {
-                    $contact->phone = $request_from;
-                    $contact->device_phone = $device->id . '_' . $request_from;
+                    $otherContact = Contact::where('user_id', $device->user_id)
+                        ->where('device_id', $device->id)
+                        ->where('phone', $request_from)
+                        ->where('id', '!=', $contact->id)
+                        ->first();
+                    $needsMerge = !empty($otherContact);
                 }
 
-                if (!empty($lid) && empty($contact->lid)) {
-                    $contact->lid = $lid;
-                    $contact->device_lid = $device->id . '_' . $lid;
+                // If trying to add lid, check if another contact already has this lid
+                if (!empty($lid) && empty($contact->lid) && !$needsMerge) {
+                    $otherContact = Contact::where('user_id', $device->user_id)
+                        ->where('device_id', $device->id)
+                        ->where('lid', $lid)
+                        ->where('id', '!=', $contact->id)
+                        ->first();
+                    $needsMerge = !empty($otherContact);
                 }
 
-                try {
-                    $contact->save();
-                } catch (\Exception $e) {
-                    // Ignore duplicate errors, just use existing contact data
-                    info('Contact save failed', [
-                        'error' => $e->getMessage(),
-                        'contact_id' => $contact->id ?? null,
-                        'phone' => $request_from ?? null,
-                        'lid' => $lid ?? null,
-                        'device_id' => $device->id ?? null,
-                        'request' => $request->all(),
-                        'exception' => $e
+                if ($needsMerge && $otherContact) {
+                    // MERGE: Combine both contacts into one
+                    // Keep the current contact, merge data from other contact
+                    info('Merging duplicate contacts', [
+                        'keep_contact_id' => $contact->id,
+                        'keep_phone' => $contact->phone,
+                        'keep_lid' => $contact->lid,
+                        'merge_contact_id' => $otherContact->id,
+                        'merge_phone' => $otherContact->phone,
+                        'merge_lid' => $otherContact->lid,
                     ]);
+
+                    // Update current contact with missing data from other contact
+                    if (empty($contact->phone) && !empty($otherContact->phone)) {
+                        $contact->phone = $otherContact->phone;
+                        $contact->device_phone = $otherContact->device_phone;
+                    }
+                    if (empty($contact->lid) && !empty($otherContact->lid)) {
+                        $contact->lid = $otherContact->lid;
+                        $contact->device_lid = $otherContact->device_lid;
+                    }
+                    if (empty($contact->name) && !empty($otherContact->name)) {
+                        $contact->name = $otherContact->name;
+                    }
+
+                    // Update all chats pointing to the other contact to point to this contact
+                    // Also update the phone column in chats if it's missing
+                    $chatUpdateData = ['contact_id' => $contact->id];
+                    if (!empty($contact->phone)) {
+                        // Update chats that have null phone with the merged contact's phone
+                        Chats::where('contact_id', $otherContact->id)
+                            ->whereNull('phone')
+                            ->update(['contact_id' => $contact->id, 'phone' => $contact->phone]);
+
+                        // Update chats that already have phone with just the contact_id
+                        Chats::where('contact_id', $otherContact->id)
+                            ->whereNotNull('phone')
+                            ->update(['contact_id' => $contact->id]);
+                    } else {
+                        Chats::where('contact_id', $otherContact->id)
+                            ->update(['contact_id' => $contact->id]);
+                    }
+
+                    // Delete the duplicate contact
+                    $otherContact->delete();
+
+                    // Save the merged contact
+                    try {
+                        $contact->save();
+                        info('Contact merge successful', [
+                            'contact_id' => $contact->id,
+                            'phone' => $contact->phone,
+                            'lid' => $contact->lid,
+                        ]);
+                    } catch (\Exception $e) {
+                        info('Contact merge save failed', [
+                            'error' => $e->getMessage(),
+                            'contact_id' => $contact->id ?? null,
+                            'exception' => $e
+                        ]);
+                    }
+
+                    $is_exist = $contact;
+                } else {
+                    // Normal update without merge
+                    if (!empty($request_from) && empty($contact->phone)) {
+                        $contact->phone = $request_from;
+                        $contact->device_phone = $device->id . '_' . $request_from;
+                    }
+
+                    if (!empty($lid) && empty($contact->lid)) {
+                        $contact->lid = $lid;
+                        $contact->device_lid = $device->id . '_' . $lid;
+                    }
+
+                    try {
+                        $contact->save();
+                    } catch (\Exception $e) {
+                        // Log the error but continue with existing contact data
+                        info('Contact save failed', [
+                            'error' => $e->getMessage(),
+                            'contact_id' => $contact->id ?? null,
+                            'phone' => $request_from ?? null,
+                            'lid' => $lid ?? null,
+                            'device_id' => $device->id ?? null,
+                            'request' => $request->all(),
+                            'exception' => $e
+                        ]);
+                    }
+                    $is_exist = $contact;
                 }
-                $is_exist = $contact;
             } else {
                 // Create new contact
                 $data['created_at'] = date('Y-m-d H:i:s');
