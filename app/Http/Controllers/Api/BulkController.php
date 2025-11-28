@@ -365,6 +365,9 @@ class BulkController extends Controller
         //INSERT MESSAGES
         try {
             // Find existing contact by any matching identifier
+            // Order by: 1) contacts with both phone AND lid (most complete)
+            //           2) most recently updated
+            //           3) highest ID (newest)
             $contact = Contact::where('user_id', $device->user_id)
                 ->where('device_id', $device->id)
                 ->where(function ($query) use ($request_from, $lid) {
@@ -375,6 +378,9 @@ class BulkController extends Controller
                         $query->orWhere('lid', $lid);
                     }
                 })
+                ->orderByRaw('(phone IS NOT NULL AND lid IS NOT NULL) DESC')
+                ->orderBy('updated_at', 'desc')
+                ->orderBy('id', 'desc')
                 ->first();
 
             // Prepare update data (only non-null values)
