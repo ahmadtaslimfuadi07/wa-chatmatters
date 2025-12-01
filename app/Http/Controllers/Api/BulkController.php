@@ -442,12 +442,20 @@ class BulkController extends Controller
                     // Update current contact with missing data from other contact
                     if (empty($contact->phone) && !empty($otherContact->phone)) {
                         $contact->phone = $otherContact->phone;
-                        $contact->device_phone = $otherContact->device_phone;
+                        $contact->device_phone = $otherContact->device_phone ?? ($device->id . '_' . $otherContact->phone);
+                    } elseif (!empty($contact->phone) && empty($contact->device_phone)) {
+                        // Fix: phone exists but device_phone is null
+                        $contact->device_phone = $device->id . '_' . $contact->phone;
                     }
+
                     if (empty($contact->lid) && !empty($otherContact->lid)) {
                         $contact->lid = $otherContact->lid;
-                        $contact->device_lid = $otherContact->device_lid;
+                        $contact->device_lid = $otherContact->device_lid ?? ($device->id . '_' . $otherContact->lid);
+                    } elseif (!empty($contact->lid) && empty($contact->device_lid)) {
+                        // Fix: lid exists but device_lid is null
+                        $contact->device_lid = $device->id . '_' . $contact->lid;
                     }
+
                     if (empty($contact->name) && !empty($otherContact->name)) {
                         $contact->name = $otherContact->name;
                     }
@@ -492,30 +500,48 @@ class BulkController extends Controller
                     $is_exist = $contact;
                 } else {
                     // Normal update without merge
+                    $contactUpdated = false;
+
+                    // Update phone if needed
                     if (!empty($request_from) && empty($contact->phone)) {
                         $contact->phone = $request_from;
                         $contact->device_phone = $device->id . '_' . $request_from;
+                        $contactUpdated = true;
+                    } elseif (!empty($contact->phone) && empty($contact->device_phone)) {
+                        // Fix: phone exists but device_phone is null
+                        $contact->device_phone = $device->id . '_' . $contact->phone;
+                        $contactUpdated = true;
                     }
 
+                    // Update lid if needed
                     if (!empty($lid) && empty($contact->lid)) {
                         $contact->lid = $lid;
                         $contact->device_lid = $device->id . '_' . $lid;
+                        $contactUpdated = true;
+                    } elseif (!empty($contact->lid) && empty($contact->device_lid)) {
+                        // Fix: lid exists but device_lid is null
+                        $contact->device_lid = $device->id . '_' . $contact->lid;
+                        $contactUpdated = true;
                     }
 
-                    try {
-                        $contact->save();
-                    } catch (\Exception $e) {
-                        // Log the error but continue with existing contact data
-                        info('Contact save failed', [
-                            'error' => $e->getMessage(),
-                            'contact_id' => $contact->id ?? null,
-                            'phone' => $request_from ?? null,
-                            'lid' => $lid ?? null,
-                            'device_id' => $device->id ?? null,
-                            'request' => $request->all(),
-                            'exception' => $e
-                        ]);
+                    // Only save if something changed
+                    if ($contactUpdated) {
+                        try {
+                            $contact->save();
+                        } catch (\Exception $e) {
+                            // Log the error but continue with existing contact data
+                            info('Contact save failed', [
+                                'error' => $e->getMessage(),
+                                'contact_id' => $contact->id ?? null,
+                                'phone' => $request_from ?? null,
+                                'lid' => $lid ?? null,
+                                'device_id' => $device->id ?? null,
+                                'request' => $request->all(),
+                                'exception' => $e
+                            ]);
+                        }
                     }
+
                     $is_exist = $contact;
                 }
             } else {
