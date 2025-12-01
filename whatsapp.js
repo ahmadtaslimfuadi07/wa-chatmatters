@@ -178,6 +178,38 @@ const createSession = async (sessionId, isLegacy = false, res = null) => {
         } catch {}
     })
 
+    sock.ev.on('contacts.upsert', async (contacts) => {
+        try {
+            const contactWebhook = process.env.APP_URL + '/api/contact/webhook/' + sessionId
+            axios
+                .post(contactWebhook, {
+                    type: 'upsert',
+                    contacts,
+                })
+                .catch((err) => {
+                    console.log('contacts.upsert error', err)
+                })
+        } catch (e) {
+            console.log('contacts.upsert error', e)
+        }
+    })
+
+    sock.ev.on('contacts.update', async (contacts) => {
+        try {
+            const contactWebhook = process.env.APP_URL + '/api/contact/webhook/' + sessionId
+            axios
+                .post(contactWebhook, {
+                    type: 'update',
+                    contacts,
+                })
+                .catch((err) => {
+                    console.log('contacts.update error', err)
+                })
+        } catch (e) {
+            console.log('contacts.update error', e)
+        }
+    })
+
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update
         const statusCode = lastDisconnect?.error?.output?.statusCode

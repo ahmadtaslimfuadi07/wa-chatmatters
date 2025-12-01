@@ -149,4 +149,26 @@ class ContactController extends Controller
             ],400);
         }
     }
+
+    /**
+     * webhook for contact updates from WhatsApp
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  string  $device_id
+     * @return \Illuminate\Http\Response
+     */
+    public function webhook(Request $request, $device_id)
+    {
+        \Log::info('Contact webhook received', [
+            'device_id' => $device_id,
+            'type' => $request->type,
+            'contacts' => $request->contacts,
+            'full_request' => $request->all()
+        ]);
+
+        return response()->json([
+            'code' => 200,
+            'message' => 'Webhook received successfully',
+        ], 200);
+    }
 }

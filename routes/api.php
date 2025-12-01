@@ -22,6 +22,7 @@ Route::group(['middleware' => ['throttle:api']], function (){
     Route::post('/batch-webhook/{device_id}','App\Http\Controllers\Api\BulkController@batchWebHook');
     Route::post('contact/create','App\Http\Controllers\Api\ContactController@create')->name('api.create.contact');
     Route::post('contact/update','App\Http\Controllers\Api\ContactController@update')->name('api.update.contact');
+    Route::post('contact/webhook/{device_id}','App\Http\Controllers\Api\ContactController@webhook')->name('api.contact.webhook');
     Route::post('chat/list','App\Http\Controllers\Api\ChatController@list')->name('api.chat.list');
     Route::post('/chat/update-status','App\Http\Controllers\Api\ChatController@updateStatus')->name('api.chat.updateStatus');
 
