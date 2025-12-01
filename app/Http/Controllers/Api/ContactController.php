@@ -162,7 +162,6 @@ class ContactController extends Controller
         \Log::info('Contact webhook received', [
             'device_id' => $device_id,
             'type' => $request->type,
-            'contacts' => $request->contacts,
         ]);
 
         // Extract numeric ID from device_id (e.g., "device_1393" -> "1393")
@@ -172,8 +171,8 @@ class ContactController extends Controller
         }
 
         // Validate device exists
-        $Device_ = Device::where('id', $numericDeviceId)->first();
-        if ($Device_ == null) {
+        $device = Device::where('id', $numericDeviceId)->first();
+        if ($device == null) {
             return response()->json([
                 'code' => 400,
                 'message' => 'device_id not found',
@@ -199,7 +198,7 @@ class ContactController extends Controller
                 // Prepare data for upsert
                 $dataToUpsert = [
                     'device_id' => $numericDeviceId,
-                    'user_id' => $Device_->user_id,
+                    'user_id' => $device->user_id,
                     'name' => $contactData['name'] ?? null,
                 ];
 
