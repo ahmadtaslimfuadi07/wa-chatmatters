@@ -253,8 +253,29 @@ class ContactController extends Controller
                         }
                         $existingContact->save();
                     } else {
-                        // Create new contact
-                        Contact::create($dataToUpsert);
+                        // Before creating, check if device_phone or device_lid already exists
+                        $conflictingContact = null;
+
+                        if (isset($dataToUpsert['device_phone'])) {
+                            $conflictingContact = Contact::where('device_phone', $dataToUpsert['device_phone'])->first();
+                        }
+
+                        if (!$conflictingContact && isset($dataToUpsert['device_lid'])) {
+                            $conflictingContact = Contact::where('device_lid', $dataToUpsert['device_lid'])->first();
+                        }
+
+                        if ($conflictingContact) {
+                            // Update the conflicting contact instead of creating new one
+                            foreach ($dataToUpsert as $key => $value) {
+                                if ($value !== null) {
+                                    $conflictingContact->$key = $value;
+                                }
+                            }
+                            $conflictingContact->save();
+                        } else {
+                            // Create new contact
+                            Contact::create($dataToUpsert);
+                        }
                     }
 
                     $processedCount++;
