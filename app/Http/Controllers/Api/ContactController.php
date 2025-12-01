@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use App\Models\Contact;
 use App\Models\User;
 use App\Models\Device;
+use App\Models\Chats;
 use Http;
 use Auth;
 use Str;
@@ -196,6 +197,16 @@ class ContactController extends Controller
                     $lidPhone = explode('@', $contactData['lid'])[0];
                 }
 
+                // Skip contacts without phone or lid (invalid data)
+                if (!$phone && !$lidPhone) {
+                    \Log::warning('Contact webhook - skipped invalid contact', [
+                        'device_id' => $device_id,
+                        'contact' => $contactData,
+                        'reason' => 'No phone or lid provided',
+                    ]);
+                    continue;
+                }
+
                 // Prepare data for upsert
                 $dataToUpsert = [
                     'device_id' => $numericDeviceId,
@@ -215,48 +226,90 @@ class ContactController extends Controller
 
                 // Perform upsert based on unique constraints
                 try {
-                    $existingContact = null;
+                    // Find ALL related contacts in optimized queries
+                    $query = Contact::where('device_id', $numericDeviceId);
 
-                    // 1. Search by device_phone
-                    if ($phone) {
-                        $compositeDevicePhone = $numericDeviceId . '_' . $phone;
-                        $existingContact = Contact::where('device_phone', $compositeDevicePhone)
-                            ->orderBy('id', 'desc')
-                            ->first();
-                    }
-
-                    // 2. Search by device_id AND phone
-                    if (!$existingContact && $phone) {
-                        $existingContact = Contact::where('device_id', $numericDeviceId)
-                            ->where('phone', $phone)
-                            ->orderBy('id', 'desc')
-                            ->first();
-                    }
-
-                    // 3. Search by device_lid
-                    if (!$existingContact && $lidPhone) {
-                        $compositeDeviceLid = $numericDeviceId . '_' . $lidPhone;
-                        $existingContact = Contact::where('device_lid', $compositeDeviceLid)
-                            ->orderBy('id', 'desc')
-                            ->first();
-                    }
-
-                    // 4. Search by device_id AND lid
-                    if (!$existingContact && $lidPhone) {
-                        $existingContact = Contact::where('device_id', $numericDeviceId)
-                            ->where('lid', $lidPhone)
-                            ->orderBy('id', 'desc')
-                            ->first();
-                    }
-
-                    if ($existingContact) {
-                        // Update existing contact
-                        foreach ($dataToUpsert as $key => $value) {
-                            if ($value !== null) {
-                                $existingContact->$key = $value;
-                            }
+                    // Build WHERE conditions to find all matching contacts
+                    $query->where(function($q) use ($phone, $lidPhone, $numericDeviceId) {
+                        if ($phone) {
+                            $compositeDevicePhone = $numericDeviceId . '_' . $phone;
+                            $q->orWhere('device_phone', $compositeDevicePhone)
+                              ->orWhere('phone', $phone);
                         }
-                        $existingContact->save();
+
+                        if ($lidPhone) {
+                            $compositeDeviceLid = $numericDeviceId . '_' . $lidPhone;
+                            $q->orWhere('device_lid', $compositeDeviceLid)
+                              ->orWhere('lid', $lidPhone);
+                        }
+                    });
+
+                    $allRelatedContacts = $query->get();
+
+                    if ($allRelatedContacts->isNotEmpty()) {
+                        // Use DB transaction for data consistency
+                        DB::beginTransaction();
+
+                        try {
+                            // Sort by ID descending to get newest first
+                            $sortedContacts = $allRelatedContacts->sortByDesc('id')->values();
+
+                            // Keep the newest contact
+                            $contactToKeep = $sortedContacts->first();
+                            $contactsToDelete = $sortedContacts->slice(1);
+
+                            if ($contactsToDelete->isNotEmpty()) {
+                                // Collect all old contact IDs
+                                $oldContactIds = $contactsToDelete->pluck('id')->toArray();
+
+                                // Merge data from older contacts into the newest one
+                                foreach ($contactsToDelete as $oldContact) {
+                                    // Fill in missing fields (check for null, not empty)
+                                    if ($contactToKeep->device_phone === null && $oldContact->device_phone !== null) {
+                                        $contactToKeep->device_phone = $oldContact->device_phone;
+                                    }
+                                    if ($contactToKeep->phone === null && $oldContact->phone !== null) {
+                                        $contactToKeep->phone = $oldContact->phone;
+                                    }
+                                    if ($contactToKeep->device_lid === null && $oldContact->device_lid !== null) {
+                                        $contactToKeep->device_lid = $oldContact->device_lid;
+                                    }
+                                    if ($contactToKeep->lid === null && $oldContact->lid !== null) {
+                                        $contactToKeep->lid = $oldContact->lid;
+                                    }
+                                    if ($contactToKeep->name === null && $oldContact->name !== null) {
+                                        $contactToKeep->name = $oldContact->name;
+                                    }
+                                }
+
+                                // Batch update: Update all chats at once
+                                Chats::whereIn('contact_id', $oldContactIds)
+                                    ->update(['contact_id' => $contactToKeep->id]);
+
+                                // Batch delete: Delete all old contacts at once
+                                Contact::whereIn('id', $oldContactIds)->delete();
+
+                                \Log::info('Contact webhook - merged duplicates', [
+                                    'device_id' => $device_id,
+                                    'kept_contact_id' => $contactToKeep->id,
+                                    'deleted_contact_ids' => $oldContactIds,
+                                    'merged_count' => count($oldContactIds),
+                                ]);
+                            }
+
+                            // Update the kept contact with new data
+                            foreach ($dataToUpsert as $key => $value) {
+                                if ($value !== null) {
+                                    $contactToKeep->$key = $value;
+                                }
+                            }
+                            $contactToKeep->save();
+
+                            DB::commit();
+                        } catch (\Exception $e) {
+                            DB::rollBack();
+                            throw $e;
+                        }
                     } else {
                         // Create new contact
                         Contact::create($dataToUpsert);
