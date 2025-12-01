@@ -159,11 +159,6 @@ class ContactController extends Controller
      */
     public function webhook(Request $request, $device_id)
     {
-        \Log::info('Contact webhook received', [
-            'device_id' => $device_id,
-            'type' => $request->type,
-        ]);
-
         // Extract numeric ID from device_id (e.g., "device_1393" -> "1393")
         $numericDeviceId = $device_id;
         if (strpos($device_id, 'device_') === 0) {
@@ -180,6 +175,12 @@ class ContactController extends Controller
         }
 
         if ($request->type === 'upsert' && is_array($request->contacts)) {
+            \Log::info('Contact webhook received', [
+                'device_id' => $device_id,
+                'type' => $request->type,
+                'contacts_count' => count($request->contacts),
+            ]);
+
             $processedCount = 0;
 
             foreach ($request->contacts as $contactData) {
@@ -205,42 +206,47 @@ class ContactController extends Controller
                 // Create composite device_phone and device_lid (e.g., "123_6282261517492")
                 if ($phone) {
                     $dataToUpsert['device_phone'] = $numericDeviceId . '_' . $phone;
+                    $dataToUpsert['phone'] = $phone; // Store just the number
                 }
                 if ($lidPhone) {
                     $dataToUpsert['device_lid'] = $numericDeviceId . '_' . $lidPhone;
-                }
-                if (isset($contactData['jid'])) {
-                    $dataToUpsert['phone'] = $contactData['jid'];
-                }
-                if (isset($contactData['lid'])) {
-                    $dataToUpsert['lid'] = $contactData['lid'];
+                    $dataToUpsert['lid'] = $lidPhone; // Store just the number
                 }
 
                 // Perform upsert based on unique constraints
                 try {
-                    // Try to find existing contact by device_id + phone/lid
                     $existingContact = null;
 
+                    // 1. Search by device_phone
                     if ($phone) {
-                        // Try composite device_phone first, then fallback to device_id + phone
                         $compositeDevicePhone = $numericDeviceId . '_' . $phone;
-                        $existingContact = Contact::where('device_phone', $compositeDevicePhone)->first();
+                        $existingContact = Contact::where('device_phone', $compositeDevicePhone)
+                            ->orderBy('id', 'desc')
+                            ->first();
+                    }
 
-                        if (!$existingContact) {
-                            $existingContact = Contact::where('device_id', $numericDeviceId)
-                                ->where('phone', $contactData['jid'])
-                                ->first();
-                        }
-                    } elseif ($lidPhone) {
-                        // Try composite device_lid first, then fallback to device_id + lid
+                    // 2. Search by device_id AND phone
+                    if (!$existingContact && $phone) {
+                        $existingContact = Contact::where('device_id', $numericDeviceId)
+                            ->where('phone', $phone)
+                            ->orderBy('id', 'desc')
+                            ->first();
+                    }
+
+                    // 3. Search by device_lid
+                    if (!$existingContact && $lidPhone) {
                         $compositeDeviceLid = $numericDeviceId . '_' . $lidPhone;
-                        $existingContact = Contact::where('device_lid', $compositeDeviceLid)->first();
+                        $existingContact = Contact::where('device_lid', $compositeDeviceLid)
+                            ->orderBy('id', 'desc')
+                            ->first();
+                    }
 
-                        if (!$existingContact) {
-                            $existingContact = Contact::where('device_id', $numericDeviceId)
-                                ->where('lid', $contactData['lid'])
-                                ->first();
-                        }
+                    // 4. Search by device_id AND lid
+                    if (!$existingContact && $lidPhone) {
+                        $existingContact = Contact::where('device_id', $numericDeviceId)
+                            ->where('lid', $lidPhone)
+                            ->orderBy('id', 'desc')
+                            ->first();
                     }
 
                     if ($existingContact) {
@@ -252,39 +258,26 @@ class ContactController extends Controller
                         }
                         $existingContact->save();
                     } else {
-                        // Before creating, check if device_phone or device_lid already exists
-                        $conflictingContact = null;
-
-                        if (isset($dataToUpsert['device_phone'])) {
-                            $conflictingContact = Contact::where('device_phone', $dataToUpsert['device_phone'])->first();
-                        }
-
-                        if (!$conflictingContact && isset($dataToUpsert['device_lid'])) {
-                            $conflictingContact = Contact::where('device_lid', $dataToUpsert['device_lid'])->first();
-                        }
-
-                        if ($conflictingContact) {
-                            // Update the conflicting contact instead of creating new one
-                            foreach ($dataToUpsert as $key => $value) {
-                                if ($value !== null) {
-                                    $conflictingContact->$key = $value;
-                                }
-                            }
-                            $conflictingContact->save();
-                        } else {
-                            // Create new contact
-                            Contact::create($dataToUpsert);
-                        }
+                        // Create new contact
+                        Contact::create($dataToUpsert);
                     }
 
                     $processedCount++;
                 } catch (\Exception $e) {
-                    \Log::error('Contact upsert failed', [
+                    \Log::error('Contact webhook - upsert failed', [
+                        'device_id' => $device_id,
                         'contact' => $contactData,
                         'error' => $e->getMessage(),
                     ]);
                 }
             }
+
+            \Log::info('Contact webhook completed', [
+                'device_id' => $device_id,
+                'total_contacts' => count($request->contacts),
+                'processed_count' => $processedCount,
+                'failed_count' => count($request->contacts) - $processedCount,
+            ]);
 
             return response()->json([
                 'code' => 200,
