@@ -163,8 +163,115 @@ class ContactController extends Controller
             'device_id' => $device_id,
             'type' => $request->type,
             'contacts' => $request->contacts,
-            'full_request' => $request->all()
         ]);
+
+        // Extract numeric ID from device_id (e.g., "device_1393" -> "1393")
+        $numericDeviceId = $device_id;
+        if (strpos($device_id, 'device_') === 0) {
+            $numericDeviceId = str_replace('device_', '', $device_id);
+        }
+
+        // Validate device exists
+        $Device_ = Device::where('id', $numericDeviceId)->first();
+        if ($Device_ == null) {
+            return response()->json([
+                'code' => 400,
+                'message' => 'device_id not found',
+            ], 400);
+        }
+
+        if ($request->type === 'upsert' && is_array($request->contacts)) {
+            $processedCount = 0;
+
+            foreach ($request->contacts as $contactData) {
+                // Extract phone from jid (e.g., "6282261517492@s.whatsapp.net" -> "6282261517492")
+                $phone = null;
+                if (isset($contactData['jid'])) {
+                    $phone = explode('@', $contactData['jid'])[0];
+                }
+
+                // Extract lid phone from lid (e.g., "262779068010559@lid" -> "262779068010559")
+                $lidPhone = null;
+                if (isset($contactData['lid'])) {
+                    $lidPhone = explode('@', $contactData['lid'])[0];
+                }
+
+                // Prepare data for upsert
+                $dataToUpsert = [
+                    'device_id' => $numericDeviceId,
+                    'user_id' => $Device_->user_id,
+                    'name' => $contactData['name'] ?? null,
+                ];
+
+                // Create composite device_phone and device_lid (e.g., "123_6282261517492")
+                if ($phone) {
+                    $dataToUpsert['device_phone'] = $numericDeviceId . '_' . $phone;
+                }
+                if ($lidPhone) {
+                    $dataToUpsert['device_lid'] = $numericDeviceId . '_' . $lidPhone;
+                }
+                if (isset($contactData['jid'])) {
+                    $dataToUpsert['phone'] = $contactData['jid'];
+                }
+                if (isset($contactData['lid'])) {
+                    $dataToUpsert['lid'] = $contactData['lid'];
+                }
+
+                // Perform upsert based on unique constraints
+                try {
+                    // Try to find existing contact by device_id + phone/lid
+                    $existingContact = null;
+
+                    if ($phone) {
+                        // Try composite device_phone first, then fallback to device_id + phone
+                        $compositeDevicePhone = $numericDeviceId . '_' . $phone;
+                        $existingContact = Contact::where('device_phone', $compositeDevicePhone)->first();
+
+                        if (!$existingContact) {
+                            $existingContact = Contact::where('device_id', $numericDeviceId)
+                                ->where('phone', $contactData['jid'])
+                                ->first();
+                        }
+                    } elseif ($lidPhone) {
+                        // Try composite device_lid first, then fallback to device_id + lid
+                        $compositeDeviceLid = $numericDeviceId . '_' . $lidPhone;
+                        $existingContact = Contact::where('device_lid', $compositeDeviceLid)->first();
+
+                        if (!$existingContact) {
+                            $existingContact = Contact::where('device_id', $numericDeviceId)
+                                ->where('lid', $contactData['lid'])
+                                ->first();
+                        }
+                    }
+
+                    if ($existingContact) {
+                        // Update existing contact
+                        foreach ($dataToUpsert as $key => $value) {
+                            if ($value !== null) {
+                                $existingContact->$key = $value;
+                            }
+                        }
+                        $existingContact->save();
+                    } else {
+                        // Create new contact
+                        Contact::create($dataToUpsert);
+                    }
+
+                    $processedCount++;
+                } catch (\Exception $e) {
+                    \Log::error('Contact upsert failed', [
+                        'contact' => $contactData,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            return response()->json([
+                'code' => 200,
+                'message' => 'Contacts upserted successfully',
+                'processed_count' => $processedCount,
+            ], 200);
+        }
 
         return response()->json([
             'code' => 200,
