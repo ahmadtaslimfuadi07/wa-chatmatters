@@ -673,20 +673,20 @@ class BulkController extends Controller
 
         //START CHATBOT
         if ($device != null && $message != null && !$request->fromMe) {
-            $replies = Reply::where('device_id', $device_id)->with('template')->where('keyword', 'LIKE', '%' . $message . '%')->latest()->get();
-            
-            if ($replies->isEmpty()) {
-                $messages = explode(' ', $message);
-                if (count($messages) < 50) {
-                    $replies = Reply::where('device_id', $device_id)->where('match_type', '!=', 'equal')->with('template');
-                    $replies = $replies->where(function ($query) use ($messages) {
-                        for ($i = 0; $i < count($messages); $i++) {
-                            $replies = $query->orWhere("keyword", 'like', '%' . $messages[$i] . '%');
-                        }
+            $replies = Reply::where('device_id', $device_id)
+                ->with('template')
+                ->where(function ($query) use ($message) {
+                    // equal: keyword harus sama persis dengan pesan masuk
+                    $query->where(function ($q) use ($message) {
+                        $q->where('match_type', 'equal')->where('keyword', $message);
+                    })
+                    // like: pesan masuk mengandung keyword
+                    ->orWhere(function ($q) use ($message) {
+                        $q->where('match_type', 'like')->whereRaw("? LIKE CONCAT('%', keyword, '%')", [$message]);
                     });
-                    $replies = $replies->latest()->get();
-                }
-            }
+                })
+                ->latest()
+                ->get();
             foreach ($replies as $key => $reply) {
                 // if ($reply->match_type == 'equal') {
 
