@@ -261,7 +261,7 @@ class BulkController extends Controller
 
             }
 
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
 
             return response()->json(['error' => 'Request Failed'], 401);
         }
@@ -621,7 +621,7 @@ class BulkController extends Controller
             if (($is_exist->wasRecentlyCreated || is_null($is_exist->name)) && $request->fromMe != 1) {
                 $is_exist->update(['name' => $request->other['pushName'] ?? NULL]);
             }
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             info('Contact/Chat insert failed', [
                 'error' => $e->getMessage(),
                 'device_id' => $device->id ?? null,
@@ -667,7 +667,7 @@ class BulkController extends Controller
                 $webhooklogs->updated_at = date('Y-m-d H:i:s');
                 $webhooklogs->save();
             }
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             info($e);
         }
 
