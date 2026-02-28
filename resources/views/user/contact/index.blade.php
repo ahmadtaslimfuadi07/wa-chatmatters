@@ -77,6 +77,7 @@
 						<select class="form-control" name="type">
 							<option value="name" @if($type == 'name') selected="" @endif>{{ __('Contact Name') }}</option>
 							<option value="phone" @if($type == 'phone') selected="" @endif>{{ __('Whatsapp Number') }}</option>
+							<option value="lid" @if($type == 'lid') selected="" @endif>{{ __('Whatsapp LID') }}</option>
 						</select>
 						<div class="input-group-btn">
 							<button class="btn btn-neutral btn-icon"><i class="fas fa-search"></i></button>

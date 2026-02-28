@@ -674,6 +674,7 @@ class BulkController extends Controller
         //START CHATBOT
         if ($device != null && $message != null && !$request->fromMe) {
             $replies = Reply::where('device_id', $device_id)->with('template')->where('keyword', 'LIKE', '%' . $message . '%')->latest()->get();
+            
             if ($replies->isEmpty()) {
                 $messages = explode(' ', $message);
                 if (count($messages) < 50) {
@@ -686,7 +687,6 @@ class BulkController extends Controller
                     $replies = $replies->latest()->get();
                 }
             }
-
             foreach ($replies as $key => $reply) {
                 // if ($reply->match_type == 'equal') {
 
@@ -698,6 +698,8 @@ class BulkController extends Controller
                     $logs['to'] = $request_from;
                     $logs['type'] = 'chatbot';
                     $this->saveLog($logs);
+                    $data['message'] = $reply->reply;
+                    $response= $this->messageSend($data,$device->id,$request_from,'plain-text');
 
                     return response()->json([
                         'message' => array('text' => $reply->reply),
@@ -718,6 +720,7 @@ class BulkController extends Controller
                         } else {
                             $body = $template->body;
                         }
+                        $response= $this->messageSend($body,$device->id,$request_from,'text-with-template',true);
 
                         $logs['user_id'] = $device->user_id;
                         $logs['device_id'] = $device->id;

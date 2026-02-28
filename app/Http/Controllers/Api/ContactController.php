@@ -175,12 +175,18 @@ class ContactController extends Controller
             ], 400);
         }
 
+        // \Log::info('Contact webhook received original', [
+        //     'device_id' => $device_id,
+        //     'type' => $request->type,
+        //     'contacts' => $request->contacts,
+        // ]);
+
         if ($request->type === 'upsert' && is_array($request->contacts)) {
-            \Log::info('Contact webhook received', [
-                'device_id' => $device_id,
-                'type' => $request->type,
-                'contacts_count' => count($request->contacts),
-            ]);
+            // \Log::info('Contact webhook received', [
+            //     'device_id' => $device_id,
+            //     'type' => $request->type,
+            //     'contacts_count' => count($request->contacts),
+            // ]);
 
             $processedCount = 0;
 
@@ -199,11 +205,11 @@ class ContactController extends Controller
 
                 // Skip contacts without phone or lid (invalid data)
                 if (!$phone && !$lidPhone) {
-                    \Log::warning('Contact webhook - skipped invalid contact', [
-                        'device_id' => $device_id,
-                        'contact' => $contactData,
-                        'reason' => 'No phone or lid provided',
-                    ]);
+                    // \Log::warning('Contact webhook - skipped invalid contact', [
+                    //     'device_id' => $device_id,
+                    //     'contact' => $contactData,
+                    //     'reason' => 'No phone or lid provided',
+                    // ]);
                     continue;
                 }
 
@@ -289,12 +295,12 @@ class ContactController extends Controller
                                 // Batch delete: Delete all old contacts at once
                                 Contact::whereIn('id', $oldContactIds)->delete();
 
-                                \Log::info('Contact webhook - merged duplicates', [
-                                    'device_id' => $device_id,
-                                    'kept_contact_id' => $contactToKeep->id,
-                                    'deleted_contact_ids' => $oldContactIds,
-                                    'merged_count' => count($oldContactIds),
-                                ]);
+                                // \Log::info('Contact webhook - merged duplicates', [
+                                //     'device_id' => $device_id,
+                                //     'kept_contact_id' => $contactToKeep->id,
+                                //     'deleted_contact_ids' => $oldContactIds,
+                                //     'merged_count' => count($oldContactIds),
+                                // ]);
                             }
 
                             // Update the kept contact with new data
@@ -317,20 +323,20 @@ class ContactController extends Controller
 
                     $processedCount++;
                 } catch (\Exception $e) {
-                    \Log::error('Contact webhook - upsert failed', [
-                        'device_id' => $device_id,
-                        'contact' => $contactData,
-                        'error' => $e->getMessage(),
-                    ]);
+                    // \Log::error('Contact webhook - upsert failed', [
+                    //     'device_id' => $device_id,
+                    //     'contact' => $contactData,
+                    //     'error' => $e->getMessage(),
+                    // ]);
                 }
             }
 
-            \Log::info('Contact webhook completed', [
-                'device_id' => $device_id,
-                'total_contacts' => count($request->contacts),
-                'processed_count' => $processedCount,
-                'failed_count' => count($request->contacts) - $processedCount,
-            ]);
+            // \Log::info('Contact webhook completed', [
+            //     'device_id' => $device_id,
+            //     'total_contacts' => count($request->contacts),
+            //     'processed_count' => $processedCount,
+            //     'failed_count' => count($request->contacts) - $processedCount,
+            // ]);
 
             return response()->json([
                 'code' => 200,
