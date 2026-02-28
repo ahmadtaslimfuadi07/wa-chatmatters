@@ -653,19 +653,28 @@ class BulkController extends Controller
             }
             $client = new \GuzzleHttp\Client(['verify' => false]);
             for ($i = 0; $i < count($webhook); $i++) {
-                $response = $client->request('POST', $webhook[$i]->url, ['json' => $body]);
-                $statusCode = $response->getStatusCode();
-                $content = $response->getBody();
-                $webhooklogs = new Webhookslogs;
-                $webhooklogs->webhooks_id = $webhook[$i]->id;
-                $webhooklogs->request = json_encode($body, true);
-                $webhooklogs->original_request = json_encode($request->all(), true);
-                $webhooklogs->response = json_encode(json_decode($content));
-                $webhooklogs->response_code = $statusCode;
-                $webhooklogs->endpoint = $webhook[$i]->url;
-                $webhooklogs->created_at = date('Y-m-d H:i:s');
-                $webhooklogs->updated_at = date('Y-m-d H:i:s');
-                $webhooklogs->save();
+                $statusCode = 0;
+                $content = null;
+                try {
+                    $response = $client->request('POST', $webhook[$i]->url, ['json' => $body]);
+                    $statusCode = $response->getStatusCode();
+                    $content = $response->getBody();
+                } catch (\Throwable $e) {
+                    $statusCode = 0;
+                    $content = $e->getMessage();
+                    info('Webhook request failed: ' . $webhook[$i]->url, ['error' => $e->getMessage()]);
+                } finally {
+                    $webhooklogs = new Webhookslogs;
+                    $webhooklogs->webhooks_id = $webhook[$i]->id;
+                    $webhooklogs->request = json_encode($body, true);
+                    $webhooklogs->original_request = json_encode($request->all(), true);
+                    $webhooklogs->response = is_string($content) ? $content : json_encode(json_decode($content));
+                    $webhooklogs->response_code = $statusCode;
+                    $webhooklogs->endpoint = $webhook[$i]->url;
+                    $webhooklogs->created_at = date('Y-m-d H:i:s');
+                    $webhooklogs->updated_at = date('Y-m-d H:i:s');
+                    $webhooklogs->save();
+                }
             }
         } catch (\Throwable $e) {
             info($e);
